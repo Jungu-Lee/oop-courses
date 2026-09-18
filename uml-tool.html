@@ -314,7 +314,7 @@ body.bars-hidden .titleblock-footer{display:none;}
     <div class="tbf-cell"><div class="tbf-label">Drawn By</div><div class="tbf-val">이준구</div></div>
     <div class="tbf-cell"><div class="tbf-label">School</div><div class="tbf-val">대구과학고등학교</div></div>
     <div class="tbf-cell"><div class="tbf-label">Subject</div><div class="tbf-val">정보과학 · Python OOP</div></div>
-    <div class="tbf-cell"><div class="tbf-label">Tool Rev.</div><div class="tbf-val">v1.4</div></div>
+    <div class="tbf-cell"><div class="tbf-label">Tool Rev.</div><div class="tbf-val">v1.6</div></div>
     <div class="tbf-cell" title="변경 사항은 브라우저(localStorage)에 자동 저장되며 새로고침 후 복원됩니다."><div class="tbf-label">Autosave</div><div class="tbf-val" id="autosaveBadge">대기</div></div>
     <div class="tbf-spacer"></div>
     <div class="tbf-copy">제작: 대구과학고 교사 이준구 · 임의 배포를 금지함</div>
@@ -349,6 +349,12 @@ const state = {
   mouse: {x:0,y:0},
   scenarioLevel: 'basic', // 'basic' | 'intermediate' | 'advanced' — 실습 시나리오 패널 현재 탭
   zoom: { class:1, sequence:1, usecase:1 }, // 캔버스별 확대/축소 비율 (Ctrl+휠)
+  // 우클릭 드래그로 가장자리에 닿으면 그만큼 캔버스를 넓혀 무한 캔버스처럼 동작 (l/t/r/b = 각 방향으로 늘어난 논리 px)
+  canvasExtra: {
+    class:    {l:0, t:0, r:0, b:0},
+    sequence: {l:0, t:0, r:0, b:0},
+    usecase:  {l:0, t:0, r:0, b:0},
+  },
 
   class: {
     nodes: [],
@@ -398,11 +404,12 @@ function dist(x1,y1,x2,y2){ return Math.hypot(x2-x1, y2-y1); }
 const ZOOM_MIN = 0.25, ZOOM_MAX = 3;
 function canvasTabOf(canvas){ return canvas.id.replace('canvas-',''); }
 function canvasZoom(canvas){ return state.zoom[canvasTabOf(canvas)] || 1; }
+const CANVAS_MAX_DEVICE_PX = 15000; // 브라우저 캔버스 최대 크기 안전장치 (극단적 확대+무한 패닝 조합 대비)
 function setupCanvasDPR(canvas, w, h){
   const dpr = window.devicePixelRatio || 1;
   const z = canvasZoom(canvas);
-  canvas.width = Math.round(w*z*dpr);
-  canvas.height = Math.round(h*z*dpr);
+  canvas.width = Math.min(CANVAS_MAX_DEVICE_PX, Math.round(w*z*dpr));
+  canvas.height = Math.min(CANVAS_MAX_DEVICE_PX, Math.round(h*z*dpr));
   canvas.style.width = (w*z)+'px';
   canvas.style.height = (h*z)+'px';
   const ctx = canvas.getContext('2d');
@@ -412,7 +419,8 @@ function setupCanvasDPR(canvas, w, h){
 function canvasLogicalPoint(canvas, clientX, clientY){
   const r = canvas.getBoundingClientRect();
   const z = canvasZoom(canvas);
-  return {x: (clientX-r.left)/z, y: (clientY-r.top)/z};
+  const ex = state.canvasExtra[canvasTabOf(canvas)] || {l:0,t:0};
+  return {x: (clientX-r.left)/z - ex.l, y: (clientY-r.top)/z - ex.t};
 }
 /* Ctrl+휠: 커서 아래 지점을 고정한 채 확대/축소 */
 function zoomCanvasAt(tab, factor, clientX, clientY){
@@ -473,13 +481,51 @@ document.addEventListener('mousedown',(e)=>{
   if (!ctxMenuEl().classList.contains('show')) return;
   if (!ctxMenuEl().contains(e.target)) closeCtxMenu();
 });
+const PAN_GROW_THRESHOLD = 60;   // 가장자리에서 이 거리(px) 안으로 스크롤되면 캔버스를 넓힘
+const PAN_GROW_CHUNK = 700;      // 한 번에 늘리는 양(논리 px)
+const PAN_GROW_MAX_PER_SIDE = 8000; // 방향별 최대 확장량 (사실상 무한이지만 브라우저 캔버스 한계 보호)
+/* 우클릭 드래그 중 가장자리에 닿으면 그 방향으로 캔버스를 계속 넓혀 무한 캔버스처럼 보이게 함.
+   왼쪽/위로 넓힐 때는 기존 요소 좌표는 그대로 두고 그리는 위치만 밀어야 하므로(render의 ctx.translate),
+   스크롤 기준값(panState.scrollLeft/Top)도 늘어난 만큼 같이 보정해서 화면이 튀지 않게 한다. */
+function maybeGrowCanvasEdge(dx, dy, curLeft, curTop){
+  if (!panState) return false;
+  const wrap = panState.wrap;
+  const tab = wrap.id.replace('wrap-','');
+  const ex = state.canvasExtra[tab];
+  if (!ex) return false;
+  const z = state.zoom[tab] || 1;
+  let grew = false;
+  // dx>0(마우스가 오른쪽으로) → scrollLeft가 줄어드는 방향 → 왼쪽 확장 후보
+  // curLeft/curTop/panState.maxLeft/maxTop은 전부 캐시된 값으로 계산 — DOM을 다시 읽지 않아
+  // 패닝 중 매 mousemove마다 강제 리플로우가 걸려 렉이 생기는 걸 막는다.
+  if (dx > 0 && curLeft <= PAN_GROW_THRESHOLD && ex.l < PAN_GROW_MAX_PER_SIDE){
+    ex.l += PAN_GROW_CHUNK; panState.scrollLeft += PAN_GROW_CHUNK*z; panState.maxLeft += PAN_GROW_CHUNK*z; grew = true;
+  }
+  if (dx < 0 && curLeft >= panState.maxLeft - PAN_GROW_THRESHOLD && ex.r < PAN_GROW_MAX_PER_SIDE){
+    ex.r += PAN_GROW_CHUNK; panState.maxLeft += PAN_GROW_CHUNK*z; grew = true;
+  }
+  if (dy > 0 && curTop <= PAN_GROW_THRESHOLD && ex.t < PAN_GROW_MAX_PER_SIDE){
+    ex.t += PAN_GROW_CHUNK; panState.scrollTop += PAN_GROW_CHUNK*z; panState.maxTop += PAN_GROW_CHUNK*z; grew = true;
+  }
+  if (dy < 0 && curTop >= panState.maxTop - PAN_GROW_THRESHOLD && ex.b < PAN_GROW_MAX_PER_SIDE){
+    ex.b += PAN_GROW_CHUNK; panState.maxTop += PAN_GROW_CHUNK*z; grew = true;
+  }
+  if (grew) renderActive();
+  return grew;
+}
 function bindCanvasPan(){
   ['class','sequence','usecase'].forEach(tab=>{
     const wrap = $('#wrap-'+tab);
     wrap.addEventListener('mousedown',(e)=>{
       if (e.button !== 2) return;
       e.preventDefault();
-      panState = {wrap, startX:e.clientX, startY:e.clientY, scrollLeft:wrap.scrollLeft, scrollTop:wrap.scrollTop, moved:false};
+      panState = {
+        wrap, startX:e.clientX, startY:e.clientY,
+        scrollLeft:wrap.scrollLeft, scrollTop:wrap.scrollTop,
+        maxLeft: wrap.scrollWidth - wrap.clientWidth,
+        maxTop: wrap.scrollHeight - wrap.clientHeight,
+        moved:false,
+      };
       wrap.classList.add('panning');
     });
     // 우클릭 메뉴는 캔버스 위에서 항상 막는다 (드래그 후에도 안 뜨게)
@@ -489,8 +535,15 @@ function bindCanvasPan(){
     if (!panState) return;
     const dx = e.clientX - panState.startX, dy = e.clientY - panState.startY;
     if (Math.abs(dx) > 2 || Math.abs(dy) > 2) panState.moved = true;
-    panState.wrap.scrollLeft = panState.scrollLeft - dx;
-    panState.wrap.scrollTop  = panState.scrollTop  - dy;
+    let left = clamp(panState.scrollLeft - dx, 0, panState.maxLeft);
+    let top  = clamp(panState.scrollTop  - dy, 0, panState.maxTop);
+    if (maybeGrowCanvasEdge(dx, dy, left, top)){
+      // 캔버스가 커지며 기준 스크롤/한계값이 보정됐으니 같은 드래그량으로 다시 계산
+      left = clamp(panState.scrollLeft - dx, 0, panState.maxLeft);
+      top  = clamp(panState.scrollTop  - dy, 0, panState.maxTop);
+    }
+    panState.wrap.scrollLeft = left;
+    panState.wrap.scrollTop  = top;
   });
   window.addEventListener('mouseup',(e)=>{
     if (!panState || e.button !== 2) return;
@@ -713,6 +766,26 @@ function isMultiSelected(tab, kind, id){
   return !!multi && multi.some(m=>m.kind===kind && m.id===id);
 }
 function clearMulti(tab){ state[tab].multi = []; }
+/* 클릭(선택)한 요소와 이어진 관계선/메시지를 강조하기 위한 판정 함수들.
+   단일 선택(selected)과 다중 선택(multi) 둘 다 대상에 포함한다. */
+function classEdgeTouchesSelection(edge){
+  const sel = state.class.selected;
+  if (sel && sel.kind==='node' && (edge.from===sel.id || edge.to===sel.id)) return true;
+  const multi = state.class.multi;
+  return !!(multi && multi.length && multi.some(m=>m.kind==='node' && (edge.from===m.id || edge.to===m.id)));
+}
+function ucEdgeTouchesSelection(edge){
+  const sel = state.usecase.selected;
+  if (sel && (sel.kind==='actor'||sel.kind==='usecase') && (edge.from===sel.id || edge.to===sel.id)) return true;
+  const multi = state.usecase.multi;
+  return !!(multi && multi.length && multi.some(m=>(m.kind==='actor'||m.kind==='usecase') && (edge.from===m.id || edge.to===m.id)));
+}
+function seqMessageTouchesSelection(msg){
+  const sel = state.sequence.selected;
+  if (sel && sel.kind==='lifeline' && (msg.from===sel.id || msg.to===sel.id)) return true;
+  const multi = state.sequence.multi;
+  return !!(multi && multi.length && multi.some(m=>m.kind==='lifeline' && (msg.from===m.id || msg.to===m.id)));
+}
 function drawMarquee(ctx, tab){
   const d = state.drag;
   if (!d || d.kind!=='box-select' || d.tab!==tab) return;
@@ -968,31 +1041,48 @@ function computeClassLayout(node){
   return node;
 }
 
+const _gridTileCache = {};
+function getGridTile(dotColor, spacing){
+  const key = dotColor+'|'+spacing;
+  let tile = _gridTileCache[key];
+  if (tile) return tile;
+  tile = document.createElement('canvas');
+  tile.width = spacing; tile.height = spacing;
+  const tctx = tile.getContext('2d');
+  tctx.fillStyle = dotColor;
+  tctx.fillRect(spacing/2, spacing/2, 1.4, 1.4);
+  _gridTileCache[key] = tile;
+  return tile;
+}
 function drawGrid(ctx, w, h, dotColor='#E4E9EC', spacing=24){
   ctx.save();
-  ctx.fillStyle = dotColor;
-  for (let x=spacing/2; x<w; x+=spacing){
-    for (let y=spacing/2; y<h; y+=spacing){
-      ctx.fillRect(x, y, 1.4, 1.4);
-    }
-  }
+  ctx.fillStyle = ctx.createPattern(getGridTile(dotColor, spacing), 'repeat');
+  ctx.fillRect(0, 0, w, h);
   ctx.restore();
 }
 
 function renderClass(){
   historyTrack('class');
   const canvas = $('#canvas-class');
-  const W = CLASS_CANVAS_W, H = CLASS_CANVAS_H;
+  const wrapC = $('#wrap-class');
+  const zC = state.zoom.class || 1;
+  const exC = state.canvasExtra.class;
+  const W = (wrapC ? Math.max(CLASS_CANVAS_W, (wrapC.clientWidth||0)/zC) : CLASS_CANVAS_W) + exC.l + exC.r;
+  const H = (wrapC ? Math.max(CLASS_CANVAS_H, (wrapC.clientHeight||0)/zC) : CLASS_CANVAS_H) + exC.t + exC.b;
   const ctx = setupCanvasDPR(canvas, W, H);
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = '#FBFAF6';
   ctx.fillRect(0,0,W,H);
   drawGrid(ctx, W, H);
+  ctx.translate(exC.l, exC.t); // 우클릭 드래그로 늘어난 만큼 기존 요소는 원래 좌표 그대로 두고 화면만 밀어줌
 
   state.class.nodes.forEach(computeClassLayout);
 
   // edges first
-  state.class.edges.forEach(edge => drawClassEdge(ctx, edge));
+  // 강조 대상 관계선을 나중에 그려서 다른 선과 겹쳐도 위에 보이게 함
+  state.class.edges.slice()
+    .sort((a,b)=> (classEdgeTouchesSelection(a)?1:0) - (classEdgeTouchesSelection(b)?1:0))
+    .forEach(edge => drawClassEdge(ctx, edge));
   // pending connection preview
   if (state.tool.startsWith('rel-') && state.pendingSource && state.activeTab==='class'){
     const src = findClassElement(state.pendingSource.id);
@@ -1088,7 +1178,8 @@ function drawClassEdge(ctx, edge){
   if (!pts) return;
   const {p1,p2} = pts;
   const meta = CLASS_REL_TYPES[edge.type];
-  const sel = state.class.selected && state.class.selected.kind==='edge' && state.class.selected.id===edge.id;
+  const sel = (state.class.selected && state.class.selected.kind==='edge' && state.class.selected.id===edge.id)
+    || classEdgeTouchesSelection(edge);
   const angle = Math.atan2(p2.y-p1.y, p2.x-p1.x);
 
   ctx.save();
@@ -1318,6 +1409,9 @@ function seqComputeSize(){
     width = Math.max(width, (wrap.clientWidth || 0)/z);
     height = Math.max(height, (wrap.clientHeight || 0)/z);
   }
+  const exS = state.canvasExtra.sequence;
+  width += exS.l + exS.r;
+  height += exS.t + exS.b;
   return {width, height};
 }
 
@@ -1355,6 +1449,7 @@ function renderSequence(){
   ctx.clearRect(0,0,width,height);
   ctx.fillStyle='#FBFAF6'; ctx.fillRect(0,0,width,height);
   drawGrid(ctx,width,height);
+  ctx.translate(state.canvasExtra.sequence.l, state.canvasExtra.sequence.t);
 
   // x positions kept as stored on lifeline.x, but ensure default spacing if untouched
   const ll = state.sequence.lifelines;
@@ -1459,7 +1554,8 @@ function drawMessage(ctx, m, idx){
   if (!from||!to) return;
   const y = messageY(idx);
   const meta = SEQ_MSG_TYPES[m.type];
-  const sel = state.sequence.selected && state.sequence.selected.kind==='message' && state.sequence.selected.id===m.id;
+  const sel = (state.sequence.selected && state.sequence.selected.kind==='message' && state.sequence.selected.id===m.id)
+    || seqMessageTouchesSelection(m);
 
   ctx.save();
   ctx.strokeStyle = sel? '#E8A33D' : (m.type==='return' ? '#5A6E7D' : '#182430');
@@ -1699,10 +1795,16 @@ function ucActorBox(a){ return {x:a.x-24, y:a.y-32, w:48, h:80}; }
 function renderUsecase(){
   historyTrack('usecase');
   const canvas = $('#canvas-usecase');
-  const ctx = setupCanvasDPR(canvas, UC_CANVAS_W, UC_CANVAS_H);
-  ctx.clearRect(0,0,UC_CANVAS_W,UC_CANVAS_H);
-  ctx.fillStyle='#FBFAF6'; ctx.fillRect(0,0,UC_CANVAS_W,UC_CANVAS_H);
-  drawGrid(ctx,UC_CANVAS_W,UC_CANVAS_H);
+  const wrapU = $('#wrap-usecase');
+  const zU = state.zoom.usecase || 1;
+  const exU = state.canvasExtra.usecase;
+  const UCW = (wrapU ? Math.max(UC_CANVAS_W, (wrapU.clientWidth||0)/zU) : UC_CANVAS_W) + exU.l + exU.r;
+  const UCH = (wrapU ? Math.max(UC_CANVAS_H, (wrapU.clientHeight||0)/zU) : UC_CANVAS_H) + exU.t + exU.b;
+  const ctx = setupCanvasDPR(canvas, UCW, UCH);
+  ctx.clearRect(0,0,UCW,UCH);
+  ctx.fillStyle='#FBFAF6'; ctx.fillRect(0,0,UCW,UCH);
+  drawGrid(ctx,UCW,UCH);
+  ctx.translate(exU.l, exU.t);
 
   state.usecase.boundaries.forEach(b => drawBoundary(ctx,b));
 
@@ -1714,7 +1816,10 @@ function renderUsecase(){
     ctx.restore();
   }
 
-  state.usecase.edges.forEach(e => drawUCEdge(ctx,e));
+  // 강조 대상 관계선을 나중에 그려서 다른 선과 겹쳐도 위에 보이게 함
+  state.usecase.edges.slice()
+    .sort((a,b)=> (ucEdgeTouchesSelection(a)?1:0) - (ucEdgeTouchesSelection(b)?1:0))
+    .forEach(e => drawUCEdge(ctx,e));
 
   if (state.tool.startsWith('uc-') && state.pendingSource){
     const c = ucElementCenter(state.pendingSource.id);
@@ -1826,7 +1931,8 @@ function drawUCEdge(ctx, e){
   const p1 = ucBoundaryPoint(e.from, b.x, b.y);
   const p2 = ucBoundaryPoint(e.to, a.x, a.y);
   const meta = UC_REL_TYPES[e.type];
-  const sel = state.usecase.selected && state.usecase.selected.kind==='edge' && state.usecase.selected.id===e.id;
+  const sel = (state.usecase.selected && state.usecase.selected.kind==='edge' && state.usecase.selected.id===e.id)
+    || ucEdgeTouchesSelection(e);
   const angle = Math.atan2(p2.y-p1.y,p2.x-p1.x);
 
   ctx.save();
@@ -3192,6 +3298,7 @@ function switchTab(tab){
   $all('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab===tab));
   $all('.canvas-wrap').forEach(w => w.classList.toggle('hidden', w.id !== 'wrap-'+tab));
   $all('.toolbar').forEach(t => t.classList.toggle('hidden', t.id !== 'toolbar-'+tab));
+  $('#toolbar-'+tab).appendChild($('#statusText')); // 힌트 텍스트를 '초기화' 버튼 옆으로 붙임
   updateBadge();
   renderLegend();
   setTool('select');
